@@ -30,21 +30,43 @@ struct frame_buf {
 };
 static struct frame_buf frame_bufs[frame_bufs_COUNT];
 
-#define PICTURE_COUNT	2
+#define PICTURE_COUNT	0
 static int fd_frame = -1;
-#define VIDEO_SECONDS	5
+#define VIDEO_SECONDS	10
 static int fd_video = -1;
+
+/*
+static struct sigaction SIGINT_action;
+static int action = 's';
+void SIGINT_handler(int signum)
+{
+	signum;
+	printf("please input below char:\n"
+		"q :to quit;\n"
+		"s :to change size(420p or 720p).\n");
+
+	action = getc(stdin);
+}
+*/
 
 int main(int argc, char *argv[])
 {
 	int i, ret = 0, actual_size;
-	int frame_count = 0;
+	int frame_count = 0, frame_count_tmp;
 	enum v4l2_buf_type buf_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
 	if (argc < 2) {
 		printf("please input arg, like /dev/video0 [mjpeg/yuyv/h264]\n");
 		return -1;
 	}
+
+newStart:
+/*
+	sigemptyset(&SIGINT_action.sa_mask);
+	SIGINT_action.sa_flags = 0;
+	SIGINT_action.sa_handler = SIGINT_handler;
+	sigaction(SIGINT, &SIGINT_action, NULL);
+*/
 	
 	fd_dev = open(argv[1], O_RDWR);
 	if (fd_dev == -1){
@@ -58,15 +80,26 @@ int main(int argc, char *argv[])
 		printf("ioctl VIDIOC_QUERYCAP failed(%d:%s).\n", errno, strerror(errno));
 		goto out;
 	}
-	printf("Driver:\t\t%s\nCard:\t\t%s\nBus info:\t%s\nVersion:\t%u.%u.%u\nCapabilities:\t0x%x\ndevice_caps:\t0x%x\n\n",
+	printf("Driver:\t\t%s\n"
+		"Card:\t\t%s\n"
+		"Bus info:\t%s\n"
+		"Version:\t%u.%u.%u\n"
+		"Capabilities:\t0x%x\n"
+		"device_caps:\t0x%x\n\n",
 		v4l2_cap_capture.driver, v4l2_cap_capture.card, v4l2_cap_capture.bus_info, (v4l2_cap_capture.version>>16)&0xFF,
 		(v4l2_cap_capture.version>>8)&0xFF, (v4l2_cap_capture.version)&0xFF, v4l2_cap_capture.capabilities,
 		v4l2_cap_capture.device_caps);
 
+	if (!(v4l2_cap_capture.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+		printf("this deviec isn't V4L2_CAP_VIDEO_CAPTURE.\n");
+		ret = -1;
+		goto out;
+	}
+
 	v4l2_fmtdesc_capture.index = 0,
 	v4l2_fmtdesc_capture.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
 	printf("VIDIOC_ENUM_FMT:\n");
-	while(ioctl(fd_dev, VIDIOC_ENUM_FMT, &v4l2_fmtdesc_capture) != -1) {
+	while(!ioctl(fd_dev, VIDIOC_ENUM_FMT, &v4l2_fmtdesc_capture)) {
 		printf("\tindex:%d, Type:0x%x, Flags:0x%x, Description:%s, Pixelformat:0x%x\n",
 			v4l2_fmtdesc_capture.index, v4l2_fmtdesc_capture.type, v4l2_fmtdesc_capture.flags,
 			v4l2_fmtdesc_capture.description, v4l2_fmtdesc_capture.pixelformat);
@@ -85,14 +118,16 @@ int main(int argc, char *argv[])
 	printf("v4l2_cropcap_capture.defrect.left=%d, top=%d, width=%d, height=%d.\n", v4l2_cropcap_capture.defrect.left,
 			v4l2_cropcap_capture.defrect.top, v4l2_cropcap_capture.defrect.width, v4l2_cropcap_capture.defrect.height);
 
+/*
 	memset(&v4l2_crop_capture, 0, sizeof(v4l2_crop_capture));
 	v4l2_crop_capture.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	v4l2_crop_capture.c = v4l2_cropcap_capture.defrect;
-	//ret = ioctl(fd_dev, VIDIOC_S_CROP, &v4l2_crop_capture);
+	ret = ioctl(fd_dev, VIDIOC_S_CROP, &v4l2_crop_capture);
 	if (ret == -1) {
 		printf("ioctl VIDIOC_S_CROP failed(%d:%s).\n", errno, strerror(errno));
 		//goto out;
 	}
+*/
 
 	memset(&v4l2_fmt_capture, 0, sizeof(v4l2_fmt_capture));
 	v4l2_fmt_capture.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
@@ -108,8 +143,6 @@ int main(int argc, char *argv[])
 		v4l2_fmt_capture.fmt.pix.colorspace, v4l2_fmt_capture.fmt.pix.priv);
 
 	if (argc > 2) {
-		//v4l2_fmt_capture.fmt.pix.width = 640;
-		//v4l2_fmt_capture.fmt.pix.height = 480;
 		if (strcmp(argv[2], "mjpeg") == 0)
 			v4l2_fmt_capture.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
 		else if (strcmp(argv[2], "yuyv") == 0) {
@@ -119,14 +152,20 @@ int main(int argc, char *argv[])
 			v4l2_fmt_capture.fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
 		else
 			v4l2_fmt_capture.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-	} else
-		v4l2_fmt_capture.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+	}
+	if (v4l2_fmt_capture.fmt.pix.height == 720) {
+		v4l2_fmt_capture.fmt.pix.width = 848;
+		v4l2_fmt_capture.fmt.pix.height = 480;
+	} else {
+		v4l2_fmt_capture.fmt.pix.width = 1280;
+		v4l2_fmt_capture.fmt.pix.height = 720;
+	}
+
 	ret = ioctl(fd_dev, VIDIOC_S_FMT, &v4l2_fmt_capture);
 	if (ret == -1) {
 		printf("ioctl VIDIOC_S_FMT failed(%d:%s).\n", errno, strerror(errno));
 		goto out;
 	}
-
 	memset(&v4l2_fmt_capture, 0, sizeof(v4l2_fmt_capture));
 	v4l2_fmt_capture.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	ret = ioctl(fd_dev, VIDIOC_G_FMT, &v4l2_fmt_capture);
@@ -183,6 +222,7 @@ int main(int argc, char *argv[])
 		i++;
 		memset(&v4l2_buf_capture, 0, sizeof(v4l2_buf_capture));
 	}
+	printf("\n");
 
 	ret = ioctl(fd_dev, VIDIOC_STREAMON, &buf_type);
 	if (ret == -1) {
@@ -190,7 +230,7 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	printf("---------capure picture\n");
+	printf("---------capure picture %d\n", PICTURE_COUNT);
 	i = 0;
 	while (i < PICTURE_COUNT) {
 		char file_name[32];
@@ -257,15 +297,19 @@ int main(int argc, char *argv[])
 		struct timespec tv1, tv2;
 		char file_name[32];
 
-		printf("---------capure video\n");
+		printf("---------capure video %ds %dx%d\n", VIDEO_SECONDS, v4l2_fmt_capture.fmt.pix.width, v4l2_fmt_capture.fmt.pix.height);
 
 		if (v4l2_fmt_capture.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV)
-			snprintf(file_name, sizeof(file_name), "./video.yuyv");
+			snprintf(file_name, sizeof(file_name), "./video%dx%d.yuyv",
+				v4l2_fmt_capture.fmt.pix.width, v4l2_fmt_capture.fmt.pix.height);
 		if (v4l2_fmt_capture.fmt.pix.pixelformat == V4L2_PIX_FMT_H264)
-			snprintf(file_name, sizeof(file_name), "./video.h264");
+			snprintf(file_name, sizeof(file_name), "./video%dx%d.h264",
+				v4l2_fmt_capture.fmt.pix.width, v4l2_fmt_capture.fmt.pix.height);
 		else
-			snprintf(file_name, sizeof(file_name), "./video.mjpeg");
-		fd_video = open(file_name, O_CREAT|O_RDWR, (S_IRWXU&~S_IXUSR)|(S_IRWXG&~S_IXGRP));
+			snprintf(file_name, sizeof(file_name), "./video%dx%d.mjpeg",
+				v4l2_fmt_capture.fmt.pix.width, v4l2_fmt_capture.fmt.pix.height);
+		if (fd_video >= 0) { close(fd_video); fd_video = -1; }
+		fd_video = open(file_name, O_CREAT|O_RDWR|O_TRUNC, (S_IRWXU&~S_IXUSR)|(S_IRWXG&~S_IXGRP));
 		if (fd_dev == -1) {
 			ret = -1;
 			printf("open %s failed(%d:%s).\n", file_name, errno, strerror(errno));
@@ -273,7 +317,8 @@ int main(int argc, char *argv[])
 		}
 
 		frame_count = 0;
-		clock_gettime(CLOCK_REALTIME, &tv1);
+		frame_count_tmp = 0;
+		clock_gettime(CLOCK_MONOTONIC, &tv1);
 		tv2 = tv1;
 		while (tv2.tv_sec - tv1.tv_sec < VIDEO_SECONDS) {
 			fd_set read_fds;
@@ -310,12 +355,11 @@ int main(int argc, char *argv[])
 
 			frame_count++;
 			if (tv2.tv_sec - tv1.tv_sec > 1) {
-				static int ii = 0;
-				if (frame_count-ii>10) {
+				if (frame_count-frame_count_tmp>30) {
 					printf("frame rate = %f.\n\n",
 						(float)frame_count*1000/((tv2.tv_sec*1000+(float)tv2.tv_nsec/1000000)-
 						(tv1.tv_sec*1000+(float)tv1.tv_nsec/1000000)));
-					ii = frame_count;
+					frame_count_tmp = frame_count;
 				}
 			}
 
@@ -327,7 +371,7 @@ int main(int argc, char *argv[])
 
 			memset(&v4l2_buf_capture, 0, sizeof(v4l2_buf_capture));
 
-			clock_gettime(CLOCK_REALTIME, &tv2);
+			clock_gettime(CLOCK_MONOTONIC, &tv2);
 		}
 		printf("---------capure video end\n");
 	}
@@ -351,6 +395,8 @@ out:
 		}
 		i++;
 	}
+
+	goto newStart;
 	return ret;
 }
 /*

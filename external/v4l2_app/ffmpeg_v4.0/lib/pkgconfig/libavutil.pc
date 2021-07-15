@@ -1,0 +1,14 @@
+prefix=/lenge/ffmpeg/ffmpeg_v4.0
+exec_prefix=${prefix}
+libdir=/lenge/ffmpeg/ffmpeg_v4.0/lib
+includedir=/lenge/ffmpeg/ffmpeg_v4.0/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 56.14.100
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil -pthread -lm
+Libs.private: 
+Cflags: -I${includedir}
