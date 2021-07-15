@@ -23,9 +23,9 @@
 
 #include "cutils/properties.h"
 
-static char *file_print = "/dev/console";
+static char *file_print = NULL; //"/dev/console";
 static FILE *fd_print = NULL;
-#define printf(fmt, ...)	fprintf(fd_print, fmt, ##__VA_ARGS__)
+//#define printf(fmt, ...)	fprintf(fd_print, fmt, ##__VA_ARGS__)
 
 #define CAMERA_FRAME_WIDTH	1280
 #define CAMERA_FRAME_HEIGHT	720
@@ -77,6 +77,7 @@ static pthread_t pthread_array[3] = {0};
 static int capture_frame(AVPacket *packet);
 static int fb_init(void);
 static int rgba_rotate_90(unsigned char *dst, unsigned char *src, int width, int height, int isClockWise);
+static int rgba_mirror_level(unsigned char *dst, unsigned char *src, int width, int height);// __attribute__((optimize("O0")));
 static int reverse_status(void);
 static void *pthread_routine(void *arg);
 
@@ -85,10 +86,17 @@ int main(int argc, char *argv[])
 	int i = 0;
 	int ret = 0;
 
-	fd_print = fopen(file_print, "a+");
-	if (fd_print == NULL) {
-		printf("fopen %s failed(%d:%s)", file_print, errno, strerror(errno));
-		return -errno;
+	if (file_print != NULL) {
+		fd_print = fopen(file_print, "a+");
+		if (fd_print == NULL) {
+			printf("fopen %s failed(%d:%s)", file_print, errno, strerror(errno));
+			return -errno;
+		}
+	}
+
+	if (reverse_status() <= 0) {
+		printf("Not car reverse status.\n");
+		return 0;
 	}
 
 	if (argc > 1) {
@@ -261,8 +269,12 @@ out:
 	return ret;
 }
 
+//#define REVERSE_FAKE
 static int reverse_status(void)
 {
+#ifdef REVERSE_FAKE
+	return 1;
+#else
 	char buf_tmp[64];
 	int ret = 0, k = 0;
 
@@ -298,6 +310,7 @@ static int reverse_status(void)
 	}
 
 	return atoi(buf_tmp);
+#endif
 }
 
 static int capture_frame(AVPacket *packet)
@@ -308,6 +321,9 @@ static int capture_frame(AVPacket *packet)
 		.tv_sec = 3,
 		.tv_usec = 0,
 	};
+	static int frame_count = 0;
+	static struct timespec t_start;
+	struct timespec t_fps;
 
 	sem_wait(&sem_from);
 
@@ -329,6 +345,17 @@ static int capture_frame(AVPacket *packet)
 		printf("av_read_frame faild(%d:%s).\n", ret, av_err2str(ret));
 		goto out;
 	}
+
+	if (frame_count == 0) {
+		clock_gettime(CLOCK_REALTIME, &t_start);
+	}
+	clock_gettime(CLOCK_REALTIME, &t_fps);
+	if (((t_fps.tv_sec*1000000+t_fps.tv_nsec/1000)-(t_start.tv_sec*1000000+t_start.tv_nsec/1000)) > 2*1000000) {
+		printf("total capture frame rate %f fps.\n", ((float)frame_count*1000000)/((t_fps.tv_sec*1000000+t_fps.tv_nsec/1000)-
+			(t_start.tv_sec*1000000+t_start.tv_nsec/1000)));
+		frame_count = 0;
+	} else
+		frame_count++;
 out:
 	sem_post(&sem_from);
 	return ret;
@@ -448,7 +475,20 @@ static int rgba_rotate_90(unsigned char *dst, unsigned char *src, int width, int
 				k += 4;
 			}
 	} else {
+		// to do
 	}
+
+	return 0;
+}
+
+static int rgba_mirror_level(unsigned char *dst, unsigned char *src, int width, int height)
+{
+	int i, j;
+
+	for (i = 0; i < height; i++)
+		for (j = 0; j < width; j++) {
+			*((unsigned int *)dst + i*width + width-1-j) = *((unsigned int *)src + i*width + j);
+		}
 
 	return 0;
 }
@@ -479,9 +519,9 @@ static int pushToframebuffer(unsigned char *framebuffer)
 		clock_gettime(CLOCK_REALTIME, &t_start);
 	}
 	clock_gettime(CLOCK_REALTIME, &t_fps);
-	if (((t_fps.tv_sec*1000000+t_fps.tv_nsec/1000)-(t_start.tv_sec*1000000+t_start.tv_nsec/1000)) > 3*1000000) {
-		printf("actual frame rate %f fps.\n", ((float)frame_count*1000000)/((t_fps.tv_sec*1000000+t_fps.tv_nsec/1000)-
-			(t_start.tv_sec*1000000+t_start.tv_nsec/1000)));
+	if (((t_fps.tv_sec*1000000+t_fps.tv_nsec/1000)-(t_start.tv_sec*1000000+t_start.tv_nsec/1000)) > 2*1000000) {
+		printf("actual frame rate %f fps.(%s/%s)\n", ((float)frame_count*1000000)/((t_fps.tv_sec*1000000+t_fps.tv_nsec/1000)-
+			(t_start.tv_sec*1000000+t_start.tv_nsec/1000)), __DATE__, __TIME__);
 		frame_count = 0;
 	} else
 		frame_count++;
@@ -507,6 +547,8 @@ static void *pthread_routine(void *arg)
 	struct timespec t_frame;
 	struct timespec t_decode;
 	struct timespec t_scale;
+	struct timespec t_rotate;
+	struct timespec t_mirror_level;
 	struct timespec t_end;
 
 	int frame_count = 0, k = 0;
@@ -517,7 +559,8 @@ static void *pthread_routine(void *arg)
 	struct AVCodecContext *avCodecCtx = NULL;
 	struct SwsContext *scale_context = NULL;
 
-	unsigned char *framebuffer_tmp = NULL;
+	unsigned char *framebuffer_mirror = NULL;
+	unsigned char *framebuffer_rotate = NULL;
 
 	struct sigaction action;
 	struct sched_param param = {.sched_priority = 90};
@@ -560,9 +603,15 @@ static void *pthread_routine(void *arg)
 		goto out;
 	}
 
-	framebuffer_tmp = (unsigned char*)malloc(fb_surface[0].width * fb_surface[0].height * 4);
-	if (framebuffer_tmp == NULL) {
-		printf("pthread-%d:malloc framebuffer_tmp faild.\n", id);
+	framebuffer_mirror = (unsigned char*)malloc(fb_surface[0].width * fb_surface[0].height * 4);
+	if (framebuffer_mirror == NULL) {
+		printf("pthread-%d:malloc framebuffer_mirror faild.\n", id);
+		ret = -ENOMEM;
+		goto out;
+	}
+	framebuffer_rotate = (unsigned char*)malloc(fb_surface[0].width * fb_surface[0].height * 4);
+	if (framebuffer_rotate == NULL) {
+		printf("pthread-%d:malloc framebuffer_rotate faild.\n", id);
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -618,9 +667,14 @@ static void *pthread_routine(void *arg)
 		}
 		clock_gettime(CLOCK_REALTIME, &t_scale);
 
-		rgba_rotate_90(framebuffer_tmp, avFrame_dst->data[0], fb_surface[0].height, fb_surface[0].width, 1);
+		rgba_mirror_level(framebuffer_mirror, avFrame_dst->data[0], fb_surface[0].height, fb_surface[0].width);
+		//usleep(30*1000);
+		clock_gettime(CLOCK_REALTIME, &t_mirror_level);
 
-		pushToframebuffer(framebuffer_tmp);
+		rgba_rotate_90(framebuffer_rotate, /*avFrame_dst->data[0]*/framebuffer_mirror, fb_surface[0].height, fb_surface[0].width, 1);
+		clock_gettime(CLOCK_REALTIME, &t_rotate);
+
+		pushToframebuffer(framebuffer_rotate);
 
 		clock_gettime(CLOCK_REALTIME, &t_end);
 		av_packet_unref(avPacket);
@@ -635,8 +689,12 @@ static void *pthread_routine(void *arg)
 				(t_frame.tv_sec*1000000+t_frame.tv_nsec/1000)))/1000);
 			printf("\tscale %f ms.\n", ((float)((t_scale.tv_sec*1000000+t_scale.tv_nsec/1000)-
 				(t_decode.tv_sec*1000000+t_decode.tv_nsec/1000)))/1000);
-			printf("\trotate and framebuffer %f ms.\n", ((float)((t_end.tv_sec*1000000+t_end.tv_nsec/1000)-
+			printf("\tmirror %f ms.\n", ((float)((t_mirror_level.tv_sec*1000000+t_mirror_level.tv_nsec/1000)-
 				(t_scale.tv_sec*1000000+t_scale.tv_nsec/1000)))/1000);
+			printf("\trotate %f ms.\n", ((float)((t_rotate.tv_sec*1000000+t_rotate.tv_nsec/1000)-
+				(t_mirror_level.tv_sec*1000000+t_mirror_level.tv_nsec/1000)))/1000);
+			printf("\tpushToFB %f ms.\n", ((float)((t_end.tv_sec*1000000+t_end.tv_nsec/1000)-
+				(t_rotate.tv_sec*1000000+t_rotate.tv_nsec/1000)))/1000);
 			printf("frame rate %f fps.\n", ((float)frame_count*1000000)/((t_end.tv_sec*1000000+t_end.tv_nsec/1000)-
 				(t_fps.tv_sec*1000000+t_fps.tv_nsec/1000)));
 			printf("pthread %d info>>>\n", id);
@@ -713,120 +771,261 @@ out:
 	if (avFrame_dst) { av_frame_free(&avFrame_dst); avFrame_dst = NULL; }
 	if (avCodecCtx) { avcodec_close(avCodecCtx); avcodec_free_context(&avCodecCtx); avCodecCtx = NULL; }
 	if (scale_context) { sws_freeContext(scale_context); scale_context = NULL; }
-	if (framebuffer_tmp) { free(framebuffer_tmp); framebuffer_tmp = NULL;}
+	if (framebuffer_mirror) { free(framebuffer_mirror); framebuffer_mirror = NULL;}
+	if (framebuffer_rotate) { free(framebuffer_rotate); framebuffer_rotate = NULL;}
 
 	return (void *)ret;
 }
 /*
-shell@m0032:/ $ ---------
+root@m0032:/ # /system/xbin/v4l2/ffmpeg_threads_mirror /dev/video0                            <
+---------
+Input #0, video4linux2,v4l2, from '/dev/video0':
+  Duration: N/A, bitrate: N/A
+    Stream #0:0: Video: mjpeg, none, 1280x720, 25 fps, 25 tbr, 1000k tbn
 ---------
 avCodecPar->codec_id=7, avCodecPar->width=1280, avCodecPar->heigth=720, avCodecPar->format=-1.
 #########
 fb_fix_screeninfo:
-        id      sprdfb
-        smem_start      0x9ed74000
-        smem_len        6144000
-        visual  0x2
-        ypanstep        1
-        line_length     1600
+	id	sprdfb
+	smem_start	0x9ed74000
+	smem_len	6144000
+	visual	0x2
+	ypanstep	1
+	line_length	1600
 fb_var_screeninfo:
-        xres    400
-        yres    1280
-        xres_virtual    400
-        yres_virtual    3840
-        xoffset 0
-        yoffset 0
-        bits_per_pixel  32
-        grayscale       0
-        red_bitfield:
-                offset  0
-                length  8
-                msb_right       0
-        green_bitfield:
-                offset  8
-                length  8
-                msb_right       0
-        blue_bitfield:
-                offset  16
-                length  8
-                msb_right       0
-        transp_bitfield:
-                offset  24
-                length  0
-                msb_right       0
-        activate        0x4
-        height  96mm
-        width   54mm
-        pixclock        32552ps
-        rotate  0
-        colorspace      0
+	xres	400
+	yres	1280
+	xres_virtual	400
+	yres_virtual	3840
+	xoffset	0
+	yoffset	1280
+	bits_per_pixel	32
+	grayscale	0
+	red_bitfield:
+		offset	0
+		length	8
+		msb_right	0
+	green_bitfield:
+		offset	8
+		length	8
+		msb_right	0
+	blue_bitfield:
+		offset	16
+		length	8
+		msb_right	0
+	transp_bitfield:
+		offset	24
+		length	0
+		msb_right	0
+	activate	0x10
+	height	96mm
+	width	54mm
+	pixclock	32552ps
+	rotate	0
+	colorspace	0
 #########
-framebuffer_all=0xb1fc4000, fb_surface_count=3.
+framebuffer_all=0xb1f84000, fb_surface_count=3.
 pthread_create 0.
 pthread_create 1.
 pthread_create 2.
 stop bootanim.
 stop zygote.
-pthread 0 scheduler policy 0 change to 2.
-pthread 1 scheduler policy 0 change to 2.
 pthread 2 scheduler policy 0 change to 2.
-actual frame rate 24.408192 fps.
-<<<pthread 2 info
-Total 117.491997 ms.
-        frame 15.045000 ms.
-        decode 21.636999 ms.
-        scale 43.701000 ms.
-        rotate and framebuffer 37.109001 ms.
-frame rate 7.999143 fps.
-pthread 2 info>>>
-<<<pthread 1 info
-Total 121.764999 ms.
-        frame 26.122999 ms.
-        decode 21.209999 ms.
-        scale 45.013000 ms.
-        rotate and framebuffer 29.419001 ms.
-frame rate 8.138759 fps.
-pthread 1 info>>>
+pthread 1 scheduler policy 0 change to 2.
+pthread 0 scheduler policy 0 change to 2.
+[swscaler @ 0xb15e4000] deprecated pixel format used, make sure you did set range correctly
+[swscaler @ 0xb1625000] deprecated pixel format used, make sure you did set range correctly
+[swscaler @ 0xb0382000] deprecated pixel format used, make sure you did set range correctly
+total capture frame rate 24.046495 fps.
+actual frame rate 25.279751 fps.(May  9 2018/11:28:47)
+total capture frame rate 24.025625 fps.
+actual frame rate 24.027052 fps.(May  9 2018/11:28:47)
 <<<pthread 0 info
-Total 144.806000 ms.
-        frame 15.870000 ms.
-        decode 29.083000 ms.
-        scale 58.014000 ms.
-        rotate and framebuffer 41.839001 ms.
-frame rate 6.822876 fps.
+Total 125.182999 ms.
+	frame 21.881001 ms.
+	decode 21.087999 ms.
+	scale 42.785999 ms.
+	mirror 7.629000 ms.
+	rotate 29.694000 ms.
+	pushToFB 2.105000 ms.
+frame rate 7.744834 fps.
 pthread 0 info>>>
-actual frame rate 23.783405 fps.
-actual frame rate 23.818283 fps.
 <<<pthread 1 info
-Total 143.738007 ms.
-        frame 0.214000 ms.
-        decode 28.076000 ms.
-        scale 56.457001 ms.
-        rotate and framebuffer 58.991001 ms.
-frame rate 7.735781 fps.
+Total 123.991997 ms.
+	frame 23.010000 ms.
+	decode 20.843000 ms.
+	scale 43.487999 ms.
+	mirror 6.805000 ms.
+	rotate 27.709999 ms.
+	pushToFB 2.136000 ms.
+frame rate 7.494661 fps.
 pthread 1 info>>>
 <<<pthread 2 info
-Total 128.815002 ms.
-        frame 26.642000 ms.
-        decode 21.301001 ms.
-        scale 44.494999 ms.
-        rotate and framebuffer 36.376999 ms.
-frame rate 8.398379 fps.
+Total 140.044998 ms.
+	frame 8.392000 ms.
+	decode 27.434999 ms.
+	scale 54.352001 ms.
+	mirror 8.728000 ms.
+	rotate 38.390999 ms.
+	pushToFB 2.747000 ms.
+frame rate 7.771083 fps.
 pthread 2 info>>>
+total capture frame rate 23.919701 fps.
+actual frame rate 23.560955 fps.(May  9 2018/11:28:47)
+total capture frame rate 23.797024 fps.
+actual frame rate 23.797718 fps.(May  9 2018/11:28:47)
 <<<pthread 0 info
-Total 94.757004 ms.
-        frame 0.153000 ms.
-        decode 21.545000 ms.
-        scale 44.159000 ms.
-        rotate and framebuffer 28.900000 ms.
-frame rate 7.988678 fps.
+Total 102.844002 ms.
+	frame 0.122000 ms.
+	decode 21.271000 ms.
+	scale 42.389000 ms.
+	mirror 7.263000 ms.
+	rotate 29.448999 ms.
+	pushToFB 2.350000 ms.
+frame rate 8.375084 fps.
 pthread 0 info>>>
-pthread_kill 0.
-pthread_kill 1.
-pthread_kill 2.
-pthread_handler_exit signal 10.
-pthread_handler_exit signal 10.
-pthread_handler_exit signal 10.
-start bootanim.
-start zygote.
+<<<pthread 1 info
+Total 130.921005 ms.
+	frame 25.848000 ms.
+	decode 21.087999 ms.
+	scale 43.366001 ms.
+	mirror 7.568000 ms.
+	rotate 30.884001 ms.
+	pushToFB 2.167000 ms.
+frame rate 8.330174 fps.
+pthread 1 info>>>
+<<<pthread 2 info
+Total 131.561005 ms.
+	frame 0.153000 ms.
+	decode 27.740000 ms.
+	scale 53.558998 ms.
+	mirror 8.758000 ms.
+	rotate 38.513000 ms.
+	pushToFB 2.838000 ms.
+frame rate 7.300991 fps.
+pthread 2 info>>>
+total capture frame rate 23.867756 fps.
+actual frame rate 23.870325 fps.(May  9 2018/11:28:47)
+total capture frame rate 23.948572 fps.
+actual frame rate 23.913263 fps.(May  9 2018/11:28:47)
+total capture frame rate 23.985428 fps.
+actual frame rate 23.670719 fps.(May  9 2018/11:28:47)
+<<<pthread 0 info
+Total 102.508003 ms.
+	frame 0.122000 ms.
+	decode 20.965000 ms.
+	scale 42.450001 ms.
+	mirror 7.172000 ms.
+	rotate 29.541000 ms.
+	pushToFB 2.258000 ms.
+frame rate 8.410327 fps.
+pthread 0 info>>>
+<<<pthread 1 info
+Total 123.778999 ms.
+	frame 17.974001 ms.
+	decode 20.722000 ms.
+	scale 42.571999 ms.
+	mirror 7.721000 ms.
+	rotate 31.128000 ms.
+	pushToFB 3.662000 ms.
+frame rate 8.405774 fps.
+pthread 1 info>>>
+<<<pthread 2 info
+Total 147.705002 ms.
+	frame 0.153000 ms.
+	decode 27.160999 ms.
+	scale 53.344002 ms.
+	mirror 8.850000 ms.
+	rotate 41.993000 ms.
+	pushToFB 16.204000 ms.
+frame rate 7.223358 fps.
+pthread 2 info>>>
+total capture frame rate 23.795938 fps.
+actual frame rate 23.785034 fps.(May  9 2018/11:28:47)
+total capture frame rate 23.897602 fps.
+actual frame rate 23.625443 fps.(May  9 2018/11:28:47)
+<<<pthread 0 info
+Total 127.227997 ms.
+	frame 19.316999 ms.
+	decode 21.027000 ms.
+	scale 42.450001 ms.
+	mirror 7.660000 ms.
+	rotate 30.457001 ms.
+	pushToFB 6.317000 ms.
+frame rate 8.365833 fps.
+pthread 0 info>>>
+total capture frame rate 23.999628 fps.
+<<<pthread 1 info
+Total 126.679001 ms.
+	frame 22.187000 ms.
+	decode 21.025999 ms.
+	scale 43.762001 ms.
+	mirror 7.721000 ms.
+	rotate 29.877001 ms.
+	pushToFB 2.106000 ms.
+frame rate 8.401072 fps.
+pthread 1 info>>>
+<<<pthread 2 info
+Total 133.757996 ms.
+	frame 0.122000 ms.
+	decode 26.976999 ms.
+	scale 54.902000 ms.
+	mirror 8.819000 ms.
+	rotate 40.070000 ms.
+	pushToFB 2.868000 ms.
+frame rate 7.283440 fps.
+pthread 2 info>>>
+actual frame rate 23.745636 fps.(May  9 2018/11:28:47)
+total capture frame rate 23.973600 fps.
+actual frame rate 23.868521 fps.(May  9 2018/11:28:47)
+total capture frame rate 23.971104 fps.
+actual frame rate 24.358017 fps.(May  9 2018/11:28:47)
+<<<pthread 0 info
+Total 141.479004 ms.
+	frame 16.937000 ms.
+	decode 20.903999 ms.
+	scale 42.480999 ms.
+	mirror 7.568000 ms.
+	rotate 33.355999 ms.
+	pushToFB 20.233000 ms.
+frame rate 8.377543 fps.
+pthread 0 info>>>
+<<<pthread 1 info
+Total 129.028000 ms.
+	frame 24.841000 ms.
+	decode 21.118000 ms.
+	scale 43.273998 ms.
+	mirror 7.874000 ms.
+	rotate 29.815001 ms.
+	pushToFB 2.106000 ms.
+frame rate 8.397501 fps.
+pthread 1 info>>>
+<<<pthread 2 info
+Total 133.667007 ms.
+	frame 0.152000 ms.
+	decode 28.229000 ms.
+	scale 53.497002 ms.
+	mirror 8.789000 ms.
+	rotate 40.131001 ms.
+	pushToFB 2.869000 ms.
+frame rate 7.254921 fps.
+pthread 2 info>>>
+total capture frame rate 24.189217 fps.
+actual frame rate 23.902941 fps.(May  9 2018/11:28:47)
+total capture frame rate 23.908632 fps.
+actual frame rate 23.746683 fps.(May  9 2018/11:28:47)
+
+root@m0032:/ # top -t -m 15 -s rss
+  PID   TID PR CPU% S     VSS     RSS PCY UID      Thread          Proc
+ 3220  3220  1   0% S 124324K  88940K  fg root     ffmpeg_threads_ /system/xbin/v4l2/ffmpeg_threads_mirror
+ 3220  3225  0  24% R 124324K  88940K  fg root     ffmpeg_threads_ /system/xbin/v4l2/ffmpeg_threads_mirror
+ 3220  3224  2  21% R 124324K  88940K  fg root     ffmpeg_threads_ /system/xbin/v4l2/ffmpeg_threads_mirror
+ 3220  3223  3  22% R 124324K  88940K  fg root     ffmpeg_threads_ /system/xbin/v4l2/ffmpeg_threads_mirror
+ 
+ root@m0032:/ # ps -p -P -t | grep ffmpeg                                       
+USER      PID   PPID  VSIZE  RSS  PRIO  NICE  RTPRI SCHED  PCY WCHAN            PC  NAME
+root      3220  3144  124324 89040 20    0     0     0     fg  hrtimer_na b5f31894 S /system/xbin/v4l2/ffmpeg_threads_mirror
+root      3223  3220  124324 89040 -91   0     90    2     fg  dispc_sync b5f30e40 S ffmpeg_threads_
+root      3224  3220  124324 89040 -91   0     90    2     fg           0 b6132dea R ffmpeg_threads_
+root      3225  3220  124324 89040 -91   0     90    2     fg           0 b6ace750 R ffmpeg_threads_
 */
