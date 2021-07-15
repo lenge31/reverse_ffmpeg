@@ -1,0 +1,14 @@
+prefix=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install
+exec_prefix=${prefix}
+libdir=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install/lib
+includedir=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install/include
+
+Name: libavfilter
+Description: FFmpeg audio/video filtering library
+Version: 7.7.100
+Requires: libswscale >= 5.0.101, libavformat >= 58.3.100, libavcodec >= 58.8.100, libswresample >= 3.0.101, libavutil >= 56.6.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavfilter -pthread -lm
+Libs.private: 
+Cflags: -I${includedir}

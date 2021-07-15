@@ -1,0 +1,14 @@
+prefix=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install
+exec_prefix=${prefix}
+libdir=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install/lib
+includedir=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install/include
+
+Name: libswresample
+Description: FFmpeg audio resampling library
+Version: 3.0.101
+Requires: libavutil >= 56.6.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lswresample -lm
+Libs.private: 
+Cflags: -I${includedir}

@@ -1,0 +1,14 @@
+prefix=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install
+exec_prefix=${prefix}
+libdir=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install/lib
+includedir=/home/wanzhipeng/develop/ffmpeg/ffmpeg_install/include
+
+Name: libavcodec
+Description: FFmpeg codec library
+Version: 58.8.100
+Requires: libswresample >= 3.0.101, libavutil >= 56.6.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavcodec -pthread -lm
+Libs.private: 
+Cflags: -I${includedir}
