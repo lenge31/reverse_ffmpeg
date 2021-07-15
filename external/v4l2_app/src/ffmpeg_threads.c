@@ -23,7 +23,8 @@
 
 #include "cutils/properties.h"
 
-#include "reverse_line_image.h"
+#include "reverse_4_5m.h"
+#include "reverse_1_5m.h"
 
 static struct AVInputFormat *avInFmt = NULL;
 //static struct AVOutputFormat *avOutFmt = NULL;
@@ -79,15 +80,32 @@ static int fd_m0032_ctrl = -1;
 static int reverse_status(void);
 
 static int rgba_mirror_level(unsigned char *dst, unsigned char *src, int width, int height);// __attribute__((optimize("O0")));
-static unsigned char *reverse_line_data = NULL;
-static int reverse_start_width = 0;
-static int reverse_start_height= 0;
-static int reverse_end_width = 0;
-static int reverse_end_height= 0;
-static int rgba_reverse_line_init(void);
-static int rgba_reverse_line(unsigned char *data, int width, int height);
+static int rgba_level_line(unsigned char *data, int width, int height, int rgba, int src_x, int src_y, int dst_x, int dst_y);
+static int rgba_overylay(unsigned char *dst, int dst_width, int dst_height, int start_x, int start_y, unsigned char *src, int src_width, int src_height);
 static int rgba_rotate_90(unsigned char *dst, unsigned char *src, int width, int height, int isClockWise);
+
 static int delta_clock_ms(struct timespec *a, struct timespec *b);
+
+static int reverse_image(unsigned char *data, int width, int height);
+static int level_line_width = 7;
+static int reverse_image_0_x = 540;
+static int reverse_image_0_y = 169;
+static int reverse_image_1_x = 740;
+static int reverse_image_1_y = 169;
+static int reverse_image_2_x = 446;
+static int reverse_image_2_y = 269;
+static int reverse_image_3_x = 833;
+static int reverse_image_3_y = 269;
+static int reverse_image_4_x = 400;
+static int reverse_image_4_y = 319;
+static int reverse_image_5_x = 880;
+static int reverse_image_5_y = 319;
+static int reverse_image_3m_left_x = 0;
+static int reverse_image_3m_left_y = 0;
+static int reverse_image_3m_right_x = 0;
+static int reverse_image_3m_right_y = 0;
+static char *file_reverse_image_coordinate = "/persist_private/rearline.fex";
+static FILE *fd_reverse_image_coordinate = NULL;
 
 int main(int argc, char *argv[])
 {
@@ -182,10 +200,22 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	ret = rgba_reverse_line_init();
-	if (ret < 0) {
-		printf("rgba_reverse_line_init failed.\n");
-		goto out;
+	{
+		float x_y_ratio = 0;
+
+		fd_reverse_image_coordinate = fopen(file_reverse_image_coordinate, "r");
+		if (fd_reverse_image_coordinate != NULL) {
+			fscanf(fd_reverse_image_coordinate, "%d,%d:%d,%d:%d,%d:%d,%d:%d,%d:%d,%d",
+				&reverse_image_0_x, &reverse_image_0_y, &reverse_image_1_x, &reverse_image_1_y, &reverse_image_2_x, &reverse_image_2_y,
+				&reverse_image_3_x, &reverse_image_3_y, &reverse_image_4_x, &reverse_image_4_y, &reverse_image_5_x, &reverse_image_5_y);
+		}
+		x_y_ratio = (float)(reverse_image_0_x-reverse_image_2_x)/(reverse_image_2_y-reverse_image_0_y);
+		reverse_image_3m_left_y = reverse_image_0_y + (reverse_image_2_y-reverse_image_0_y)/2;
+		reverse_image_3m_left_x = (int)(x_y_ratio*(reverse_image_3m_left_y-reverse_image_0_y)	+ reverse_image_2_x);
+
+		x_y_ratio = (float)(reverse_image_3_x-reverse_image_1_x)/(reverse_image_3_y-reverse_image_1_y);;
+		reverse_image_3m_right_y = reverse_image_3m_left_y;
+		reverse_image_3m_right_x = (int)(x_y_ratio*(reverse_image_3m_right_y-reverse_image_1_y) + reverse_image_1_x);
 	}
 
 	while (1) {
@@ -255,6 +285,7 @@ int main(int argc, char *argv[])
 		property_set("ctl.start", "zygote");
 	}
 out:
+	if (fd_reverse_image_coordinate != NULL) { fclose(fd_reverse_image_coordinate); fd_reverse_image_coordinate = NULL;}
 	if (fd_capture_raw >= 0) { close(fd_capture_raw); fd_capture_raw = -1; }
 	if (fd_decode_data >= 0) { close(fd_decode_data); fd_decode_data = -1; }
 	if (fd_scale_data >= 0) { close(fd_scale_data); fd_scale_data = -1; }
@@ -263,10 +294,6 @@ out:
 	if (fd_m0032_ctrl >= 0) { close(fd_m0032_ctrl); fd_m0032_ctrl = -1; }
 	if (avFmtCtx) { avformat_close_input(&avFmtCtx); avFmtCtx = NULL; }
 	if (framebuffer_mmap && framebuffer_mmap != MAP_FAILED) { munmap(framebuffer_mmap, framebuffer_mmap_len); framebuffer_mmap = NULL;} 
-	if (reverse_line_image.width != fb_surface[0].height || reverse_line_image.height != fb_surface[0].width) {
-		free(reverse_line_data);
-		reverse_line_data= NULL;
-	}
 
 	return ret;
 }
@@ -431,108 +458,104 @@ static int rgba_mirror_level(unsigned char *dst, unsigned char *src, int width, 
 	return 0;
 }
 
-static int rgba_reverse_line_init()
+static int rgba_overylay(unsigned char *dst, int dst_width, int dst_height, int start_x, int start_y, unsigned char *src, int src_width, int src_height)
 {
-	int i,j, ret = 0;
-	int width = fb_surface[0].height;
-	int height = fb_surface[0].width;
-	unsigned int *src = NULL;
+	int i, j;
+	unsigned int value;
 
-	if (reverse_line_image.width != fb_surface[0].height || reverse_line_image.height != fb_surface[0].width) {
-		struct SwsContext *scale_context_reverse = NULL;
-		unsigned char *src_data[AV_NUM_DATA_POINTERS];
-		int src_linesize[AV_NUM_DATA_POINTERS];
-		unsigned char *dst_data[AV_NUM_DATA_POINTERS];
-		int dst_linesize[AV_NUM_DATA_POINTERS];
-
-		reverse_line_data = malloc(fb_surface[0].height * fb_surface[0].width* 4);
-		if (reverse_line_data == NULL) {
-			printf("reverse_line_data malloc failed(%d:%s)", errno, strerror(errno));
-			return -errno;
+	for (i = start_y; i>=0 && i<dst_height&& i-start_y<src_height; i++) {
+		for (j=start_x; j>=0 && j<dst_width && j-start_x<src_width; j++) {
+			value = *(((unsigned int *)src)+(i-start_y)*src_width+j-start_x);
+			if (value != 0)
+				*(((unsigned int *)dst)+i*dst_width+j) = value;
 		}
-
-		memset(src_data, 0, sizeof(src_data));
-		memset(src_linesize, 0, sizeof(src_linesize));
-		memset(dst_data, 0, sizeof(dst_data));
-		memset(dst_linesize, 0, sizeof(dst_linesize));
-		if (scale_context_reverse == NULL) {
-			scale_context_reverse = sws_getContext(reverse_line_image.width, reverse_line_image.height, AV_PIX_FMT_RGBA, 
-						fb_surface[0].height, fb_surface[0].width, AV_PIX_FMT_RGBA,
-						SWS_FAST_BILINEAR/*SWS_POINT SWS_BICUBIC SWS_X SWS_AREA SWS_BICUBLIN
-						SWS_GAUSS SWS_SINC SWS_LANCZOS SWS_SPLINE*/,
-						NULL, NULL, NULL);
-			if (!scale_context_reverse) {
-				printf("sws_getContext faild.\n");
-				return -1;
-			}
-		}
-
-		src_data[0] = reverse_line_image.pixel_data;
-		src_linesize[0] = reverse_line_image.width*4;
-		dst_data[0] = reverse_line_data;
-		dst_linesize[0] = fb_surface[0].height*4;
-		ret = sws_scale(scale_context_reverse, (const uint8_t * const*)src_data, src_linesize,
-				0, reverse_line_image.height, dst_data, dst_linesize);
-		if (ret < 0) {
-			printf("sws_scale faild(%d:%s).\n", ret, av_err2str(ret));
-			return ret;
-		}
-	} else {
-		reverse_line_data = reverse_line_image.pixel_data;
 	}
-	src = (unsigned int *)reverse_line_data;
 
-	// find start point
-	for (j=0; j<height; j++)
-		for (i=0; i<width; i++) {
-			if (*(src+i+j*width) != 0xfdfdfd && *(src+i+j*width) != 0x00ffffff) {
-				reverse_end_height = j-1;
-				break;
-			}
-		}
-	for (i=0; i<width; i++)
-		for (j=0; j<height; j++) {
-			if (*(src+i+j*width) != 0xfdfdfd && *(src+i+j*width) != 0x00ffffff) {
-				reverse_end_width = i-1;
-				break;
-			}
-		}
-	// find end point
-	for (j=height-1; j>0; j--)
-		for (i=width-1; i>0; i--) {
-			if (*(src+i+j*width) != 0xfdfdfd && *(src+i+j*width) != 0x00ffffff) {
-				reverse_start_height = j+1;
-				break;
-			}
-		}
-	for (i=width-1; i>0; i--)
-		for (j=height-1; j>0; j--) {
-			if (*(src+i+j*width) != 0xfdfdfd && *(src+i+j*width) != 0x00ffffff) {
-				reverse_start_width= i+1;
-				break;
-			}
-		}
-
-	printf("reverse_start_width=%d, reverse_start_height=%d, reverse_end_width=%d, reverse_end_height=%d.\n",
-		reverse_start_width, reverse_start_height, reverse_end_width, reverse_end_height);
-
-	return ret;
+	return 0;
 }
-static int rgba_reverse_line(unsigned char *data, int width, int height)
+
+static int rgba_level_line(unsigned char *data, int width, int height, int rgba, int src_x, int src_y, int dst_x, int dst_y)
 {
-	int i = 0, j = 0;
-	unsigned int *src_data = (unsigned int *)reverse_line_data;
-	unsigned int *dst_data = (unsigned int *)data;
+	float x,y;
+	float x_y_ratio = 0;
+	float one = 1;
+	int t_x, t_y;
+	int i = 0;
 
-	(void *)height;
-
-	for (j=reverse_start_height; j<reverse_end_height; j++)
-		for (i=reverse_start_width; i<reverse_end_width; i++) {
-			//if (i%100 == 0) printf("pixel_value=0x%x.\n", *(src_data+i+j*width));
-			if (*(src_data+i+j*width) != 0xfdfdfd && *(src_data+i+j*width) != 0x00ffffff) {
-				*(dst_data+i+j*width) = *(src_data+i+j*width);
+	if (dst_x == src_x) { // virtical
+		t_x = src_x;
+		one = (dst_y-src_y)>0?1:-1;
+		for (y=src_y; y!=dst_y && y<height && y>=0; y+=one) {
+			t_y = (int)y;
+			*((unsigned int *)data + t_y*width + t_x) = rgba;
+			for (i=1; i<level_line_width && (t_x+i)<width; i++) {
+				*((unsigned int *)data + t_y*width + t_x+i) = rgba;
 			}
 		}
+
+		return 0;
+	} else if(dst_y == src_y) { // horizontal
+		t_y = src_y;
+		one = (dst_x-src_x)>0?1:-1;
+		for (x=src_x; x!=dst_x && x<width && x>=0; x+=one) {
+			t_x = (int)x;
+			if (t_y >= height) t_y = height-1;
+			*((unsigned int *)data + t_y*width + t_x) = rgba;
+			for (i=1; i<level_line_width && (t_y+i)<height; i++) {
+				*((unsigned int *)data + (t_y+i)*width + t_x) = rgba;
+			}
+		}
+
+		return 0;
+	}
+
+	one = (dst_y-src_y)>0?1:-1;
+	x_y_ratio = (float)(dst_x-src_x)/(dst_y-src_y);
+	for (y=src_y; y!=dst_y && y<height && y>=0; y+=one) {
+		x = x_y_ratio*(y-src_y) + src_x;
+		t_x = (int)x;
+		t_y = (int)(y);
+		if (t_y >= height) t_y = height-1;
+		*((unsigned int *)data + t_y*width + t_x) = rgba;
+		for (i=1; i<level_line_width && (t_x+i)<width; i++) {
+			*((unsigned int *)data + t_y*width + t_x+i) = rgba;
+		}
+	}
+
+	return 0;
+}
+
+static int reverse_image(unsigned char *data, int width, int height)
+{
+	int right_offset = level_line_width - 3;
+
+	// green
+	rgba_level_line(data, width, height, 0xff00, reverse_image_0_x, reverse_image_0_y, reverse_image_0_x+40, reverse_image_0_y);
+	rgba_level_line(data, width, height, 0xff00, reverse_image_1_x+right_offset, reverse_image_1_y,
+		reverse_image_1_x-40+right_offset, reverse_image_1_y);
+
+	rgba_overylay(data, width, height, reverse_image_1_x-100, reverse_image_1_y-10, reverse_4_5m.pixel_data, reverse_4_5m.width, reverse_4_5m.height);
+
+	rgba_level_line(data, width, height, 0xff00, reverse_image_0_x, reverse_image_0_y, reverse_image_3m_left_x, reverse_image_3m_left_y);
+	rgba_level_line(data, width, height, 0xff00, reverse_image_1_x, reverse_image_1_y, reverse_image_3m_right_x, reverse_image_3m_right_y);
+
+	// yellow
+	rgba_level_line(data, width, height, 0xffff, reverse_image_3m_left_x, reverse_image_3m_left_y, reverse_image_3m_left_x+40, reverse_image_3m_left_y);
+	rgba_level_line(data, width, height, 0xffff, reverse_image_3m_right_x+right_offset,
+		reverse_image_3m_right_y, reverse_image_3m_right_x-40+right_offset, reverse_image_3m_right_y);
+
+	rgba_level_line(data, width, height, 0xffff, reverse_image_3m_left_x, reverse_image_3m_left_y, reverse_image_2_x, reverse_image_2_y);
+	rgba_level_line(data, width, height, 0xffff, reverse_image_3m_right_x, reverse_image_3m_right_y, reverse_image_3_x, reverse_image_3_y);
+
+	// red
+	rgba_level_line(data, width, height, 0xff, reverse_image_2_x, reverse_image_2_y, reverse_image_2_x+40, reverse_image_2_y);
+	rgba_level_line(data, width, height, 0xff, reverse_image_3_x+right_offset,
+		reverse_image_3_y, reverse_image_3_x-40+right_offset, reverse_image_3_y);
+
+	rgba_overylay(data, width, height, reverse_image_3_x-100, reverse_image_3_y-10, reverse_1_5m.pixel_data, reverse_1_5m.width, reverse_1_5m.height);
+
+	rgba_level_line(data, width, height, 0xff, reverse_image_2_x, reverse_image_2_y, reverse_image_4_x, reverse_image_4_y);
+	rgba_level_line(data, width, height, 0xff, reverse_image_3_x, reverse_image_3_y, reverse_image_5_x, reverse_image_5_y);
 
 	return 0;
 }
@@ -579,7 +602,7 @@ static void *pthread_routine(void *arg)
 	struct timespec t_decode;
 	struct timespec t_scale;
 	struct timespec t_mirror_level;
-	struct timespec t_reverse_line;
+	struct timespec t_reverse_image;
 	struct timespec t_rotate;
 	struct timespec t_end;
 
@@ -703,8 +726,8 @@ static void *pthread_routine(void *arg)
 		//usleep(30*1000);
 		clock_gettime(CLOCK_MONOTONIC, &t_mirror_level);
 
-		rgba_reverse_line(framebuffer_mirror, fb_surface[0].height, fb_surface[0].width);
-		clock_gettime(CLOCK_MONOTONIC, &t_reverse_line);
+		reverse_image(framebuffer_mirror, fb_surface[0].height, fb_surface[0].width);
+		clock_gettime(CLOCK_MONOTONIC, &t_reverse_image);
 
 		rgba_rotate_90(framebuffer_rotate, /*avFrame_scale.data[0]*/framebuffer_mirror, fb_surface[0].height, fb_surface[0].width, 1);
 		clock_gettime(CLOCK_MONOTONIC, &t_rotate);
@@ -738,8 +761,8 @@ static void *pthread_routine(void *arg)
 			printf("\tdecode %d ms.\n", delta_clock_ms(&t_decode, &t_frame));
 			printf("\tscale %d ms.\n", delta_clock_ms(&t_scale, &t_decode));
 			printf("\tmirror %d ms.\n", delta_clock_ms(&t_mirror_level, &t_scale));
-			printf("\treverse_line %d ms.\n", delta_clock_ms(&t_reverse_line, &t_mirror_level));
-			printf("\trotate %d ms.\n", delta_clock_ms(&t_rotate, &t_reverse_line));
+			printf("\treverse_image %d ms.\n", delta_clock_ms(&t_reverse_image, &t_mirror_level));
+			printf("\trotate %d ms.\n", delta_clock_ms(&t_rotate, &t_reverse_image));
 			printf("\tpushToFB %d ms.\n", delta_clock_ms(&t_end, &t_rotate));
 			printf("frame rate %f fps.\n", ((float)frame_count*1000)/delta_clock_ms(&t_end, &t_fps));
 			printf("pthread %d info>>>\n", id);
